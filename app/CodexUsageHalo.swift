@@ -299,7 +299,20 @@ final class HaloView: NSView {
     // glued to the visible sprite no matter how Codex moves its window.
     private var globalMouseMonitor: Any?
     private var dragCursorOffset: NSPoint?
-    private let isoFormatter = ISO8601DateFormatter()
+    // Server emits timestamps with fractional seconds (e.g. "...:37.000Z").
+    // Default ISO8601DateFormatter only parses without fractional seconds and
+    // returns nil otherwise — explicitly opt in.
+    private let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    // Fallback for timestamps without fractional seconds.
+    private let isoFormatterPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -599,6 +612,7 @@ final class HaloView: NSView {
                 self.weeklyPercent = Self.clamp(usage.weekly?.usedPercent ?? 0)
                 if let resetsAt = usage.session?.resetsAt {
                     self.resetsAt = self.isoFormatter.date(from: resetsAt)
+                        ?? self.isoFormatterPlain.date(from: resetsAt)
                 }
                 self.needsDisplay = true
             }
