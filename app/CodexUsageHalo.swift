@@ -269,7 +269,7 @@ final class HaloWindow: NSWindow {
 }
 
 enum DisplayMode: String {
-    case orb
+    case pulse
     case ring
 }
 
@@ -477,9 +477,9 @@ final class HaloView: NSView {
         let weeklyColor = NSColor(calibratedRed: 1.00, green: 0.75, blue: 0.31, alpha: 1)
         drawRing(context: context, center: center, radius: 61, width: 7.5, percent: session, color: sessionColor)
         drawRing(context: context, center: center, radius: 47, width: 6.0, percent: weekly, color: weeklyColor)
-        if displayMode == .orb {
-            drawOrb(context: context, center: center, radius: 61, percent: session, color: sessionColor, size: 15, phaseOffset: 0)
-            drawOrb(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 1.4)
+        if displayMode == .pulse {
+            drawPulse(context: context, center: center, radius: 61, percent: session, color: sessionColor, size: 15, phaseOffset: 0)
+            drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.45)
         }
 
         if isHovering {
@@ -584,7 +584,7 @@ final class HaloView: NSView {
     }
 
     private var displayMode: DisplayMode {
-        DisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .orb
+        DisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .pulse
     }
 
     private var usageMetric: UsageMetric {
@@ -613,22 +613,50 @@ final class HaloView: NSView {
         context.restoreGState()
     }
 
-    private func drawOrb(context: CGContext, center: CGPoint, radius: CGFloat, percent: Double, color: NSColor, size: CGFloat, phaseOffset: TimeInterval) {
+    private func drawPulse(context: CGContext, center: CGPoint, radius: CGFloat, percent: Double, color: NSColor, size: CGFloat, phaseOffset: TimeInterval) {
         let elapsed = Date().timeIntervalSince(animationStart) + phaseOffset
+
+        // Position on the ring — same sweep envelope as the legacy orb so the
+        // pulse marker still glides between min/max percent over time.
         let sweep = 0.08 + 0.92 * ((sin(elapsed * 1.08) + 1) / 2)
         let livePercent = max(0, min(100, percent * sweep))
         let angle = CGFloat.pi / 2 - CGFloat.pi * 2 * CGFloat(livePercent / 100)
         let point = CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
-        let stretchX = 1 + 0.16 * sin(elapsed * 2.8)
-        let stretchY = 1 - 0.12 * sin(elapsed * 2.8)
+
+        // Heartbeat at ~67 BPM (0.9s cycle, calm resting heart rate).
+        // Two staggered components:
+        //   1. Three concentric ripples expanding outward, fading as they grow
+        //   2. A core dot with a "lub-dub" double-peak envelope (gaussian
+        //      pulses at phase 0.07 and 0.22 within each cycle) — mimics the
+        //      sharp-attack/long-decay shape of a real arterial pulse
+        let cycle: TimeInterval = 0.9
+        let phase = elapsed.truncatingRemainder(dividingBy: cycle) / cycle  // 0..1
 
         context.saveGState()
         context.translateBy(x: point.x, y: point.y)
-        context.scaleBy(x: stretchX, y: stretchY)
-        let rect = CGRect(x: -size / 2, y: -size / 2, width: size, height: size)
-        context.setShadow(offset: .zero, blur: 13, color: color.withAlphaComponent(0.75).cgColor)
+
+        // Expanding ripples (3 staggered phases for continuous emanation)
+        for i in 0..<3 {
+            let p = (phase + Double(i) / 3.0).truncatingRemainder(dividingBy: 1.0)
+            let r = size * (0.4 + p * 1.6)
+            let alpha = (1.0 - p) * 0.55
+            context.setStrokeColor(color.withAlphaComponent(alpha).cgColor)
+            context.setLineWidth(1.2)
+            context.strokeEllipse(in: CGRect(x: -r, y: -r, width: r * 2, height: r * 2))
+        }
+
+        // Lub-dub heartbeat throb on the core
+        let lub = exp(-pow((phase - 0.07) * 20, 2))           // primary peak
+        let dub = 0.55 * exp(-pow((phase - 0.22) * 20, 2))    // smaller secondary
+        let beat = max(lub, dub)
+        let coreScale = 1 + beat * 0.45
+        let coreSize = size * 0.55 * coreScale
+        context.setShadow(offset: .zero, blur: 12,
+                          color: color.withAlphaComponent(0.7 + beat * 0.3).cgColor)
         context.setFillColor(color.cgColor)
-        context.fillEllipse(in: rect)
+        context.fillEllipse(in: CGRect(x: -coreSize / 2, y: -coreSize / 2,
+                                       width: coreSize, height: coreSize))
+
         context.restoreGState()
     }
 
@@ -749,7 +777,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: HaloWindow?
     private var statusItem: NSStatusItem?
     private weak var haloView: HaloView?
-    private var orbModeItem: NSMenuItem?
+    private var pulseModeItem: NSMenuItem?
     private var ringModeItem: NSMenuItem?
     private var usedMetricItem: NSMenuItem?
     private var leftMetricItem: NSMenuItem?
@@ -811,9 +839,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(titleItem)
         menu.addItem(.separator())
 
-        let orbItem = NSMenuItem(title: "Orb motion", action: #selector(setOrbMode), keyEquivalent: "")
+        let pulseItem = NSMenuItem(title: "Pulse motion", action: #selector(setPulseMode), keyEquivalent: "")
         let ringItem = NSMenuItem(title: "Ring only", action: #selector(setRingMode), keyEquivalent: "")
-        menu.addItem(orbItem)
+        menu.addItem(pulseItem)
         menu.addItem(ringItem)
         menu.addItem(.separator())
 
@@ -830,7 +858,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
-        orbModeItem = orbItem
+        pulseModeItem = pulseItem
         ringModeItem = ringItem
         usedMetricItem = usedItem
         leftMetricItem = leftItem
@@ -854,8 +882,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         haloView?.reloadSettings()
     }
 
-    @objc private func setOrbMode() {
-        UserDefaults.standard.set(DisplayMode.orb.rawValue, forKey: "displayMode")
+    @objc private func setPulseMode() {
+        UserDefaults.standard.set(DisplayMode.pulse.rawValue, forKey: "displayMode")
         updateSettings()
     }
 
@@ -880,9 +908,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateMenuState() {
-        let mode = DisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .orb
+        let mode = DisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .pulse
         let metric = UsageMetric(rawValue: UserDefaults.standard.string(forKey: "usageMetric") ?? "") ?? .used
-        orbModeItem?.state = mode == .orb ? .on : .off
+        pulseModeItem?.state = mode == .pulse ? .on : .off
         ringModeItem?.state = mode == .ring ? .on : .off
         usedMetricItem?.state = metric == .used ? .on : .off
         leftMetricItem?.state = metric == .left ? .on : .off
