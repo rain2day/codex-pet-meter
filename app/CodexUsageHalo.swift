@@ -616,22 +616,25 @@ final class HaloView: NSView {
     private func drawPulse(context: CGContext, center: CGPoint, radius: CGFloat, percent: Double, color: NSColor, size: CGFloat, phaseOffset: TimeInterval) {
         let elapsed = Date().timeIntervalSince(animationStart) + phaseOffset
 
-        // Anchor at the percent position on the ring. The EKG strip extends
-        // along an arc centered here — newer samples on the leading edge,
-        // older on the trailing edge, scrolling continuously like a hospital
-        // ECG monitor.
-        let angle = CGFloat.pi / 2 - CGFloat.pi * 2 * CGFloat(percent / 100)
+        // The wave runs along the SAME arc as the static ring fill: from 12
+        // o'clock clockwise for `percent` of the full circle. New beats
+        // emerge at the leading edge (the percent endpoint, where the orb
+        // used to live) and scroll back toward the start (top).
+        let percentClamped = max(0.0, min(100.0, percent)) / 100.0
+        guard percentClamped > 0.005 else { return }  // nothing to draw at ~0%
 
-        // ~50 BPM heartbeat, full PQRST wave envelope replicated as a function
-        // of phase. Each point along the strip samples the envelope at its
-        // own time offset, producing a traveling-wave appearance.
         let cycle: TimeInterval = 1.2
-        let arcSpan: CGFloat = .pi * 2 / 3        // 120° of the ring covered
-        let pointsCount = 160
-        let scrollDuration: TimeInterval = cycle * 3  // 3 full beats visible at once
+        let arcSpan: CGFloat = CGFloat(percentClamped) * .pi * 2
+        let startAngle: CGFloat = .pi / 2  // top of the ring (matches drawRing)
+        // Beat density: ~45° of arc per heartbeat. scrollDuration scales with
+        // arcSpan so the wavelength stays visually constant regardless of %.
+        let wavelength: CGFloat = .pi / 4
+        let beatsVisible = max(1.0, Double(arcSpan / wavelength))
+        let scrollDuration: TimeInterval = beatsVisible * cycle
+        // Sampling density: ~1 sample per 3° of arc, with a sane minimum.
+        let pointsCount = max(20, Int(arcSpan * 180 / .pi / 3))
         let amp: CGFloat = size * 1.6
 
-        // Sample envelope at a normalized phase 0..1
         @inline(__always) func envelope(_ phase: Double) -> Double {
             let p = 0.35 * exp(-pow((phase - 0.07) * 22, 2))
             let r = 1.00 * exp(-pow((phase - 0.25) * 22, 2))
@@ -643,10 +646,9 @@ final class HaloView: NSView {
         var points: [CGPoint] = []
         points.reserveCapacity(pointsCount + 1)
         for i in 0...pointsCount {
-            let frac = Double(i) / Double(pointsCount)        // 0 (oldest) .. 1 (newest)
-            let angleOffset = (CGFloat(frac) - 1.0) * arcSpan // strip trails behind percent
-            let pointAngle = angle - angleOffset              // angle decreases clockwise
-            let timeOffset = -(1.0 - frac) * scrollDuration   // newest = now, oldest = -cycle
+            let frac = Double(i) / Double(pointsCount)        // 0 (top, oldest) .. 1 (percent endpoint, newest)
+            let pointAngle = startAngle - arcSpan * CGFloat(frac)
+            let timeOffset = -(1.0 - frac) * scrollDuration
             let t = elapsed + timeOffset
             var raw = t.truncatingRemainder(dividingBy: cycle) / cycle
             if raw < 0 { raw += 1 }
