@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Build artifacts (the app is installed to ~/Applications, not the repo)
+build/
+*.app
+*.dmg
+
+# Runtime logs
+/tmp/codex-usage-halo.log
+/tmp/codex-usage-halo-trace.log
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# Editor
+.vscode/
+.idea/
+*.swp

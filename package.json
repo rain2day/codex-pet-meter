@@ -1,0 +1,36 @@
+{
+  "name": "codex-pet-meter",
+  "version": "0.1.0",
+  "description": "Floating halo overlay showing OpenAI Codex usage on the pet mascot",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "install-app": "node install.mjs install",
+    "start": "node install.mjs start",
+    "reset": "node install.mjs reset",
+    "status": "node install.mjs status",
+    "uninstall": "node install.mjs uninstall",
+    "trace": "node install.mjs trace",
+    "trace-stop": "node install.mjs trace-stop",
+    "server": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rain2day/codex-pet-meter.git"
+  },
+  "author": "rain2day",
+  "keywords": [
+    "macos",
+    "overlay",
+    "codex",
+    "openai",
+    "usage",
+    "swift",
+    "appkit",
+    "accessibility-api"
+  ]
+}
