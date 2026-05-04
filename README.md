@@ -127,8 +127,6 @@ If this becomes annoying and you have an Apple Developer membership, you can swa
 
 See [docs/design.md](docs/design.md) for the diagnosis trail behind the current tracking implementation, including the cursor-tracking workaround for Codex's edge teleport behavior.
 
-[docs/implementation-plan.md](docs/implementation-plan.md) has the original task-by-task instrumentation plan.
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
