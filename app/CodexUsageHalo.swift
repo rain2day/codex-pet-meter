@@ -273,6 +273,11 @@ enum DisplayMode: String {
     case ring
 }
 
+enum Formation: String {
+    case stacked  // two concentric rings (session outer, weekly inner)
+    case split    // single radius split into halves: session right, weekly left
+}
+
 enum UsageMetric: String {
     case used
     case left
@@ -488,11 +493,31 @@ final class HaloView: NSView {
         let weekly = displayPercent(weeklyPercent)
         let sessionColor = Self.sessionColor()
         let weeklyColor = Self.weeklyColor()
-        drawRing(context: context, center: center, radius: 61, width: 7.5, percent: session, color: sessionColor)
-        drawRing(context: context, center: center, radius: 47, width: 6.0, percent: weekly, color: weeklyColor)
-        if displayMode == .pulse {
-            drawPulse(context: context, center: center, radius: 61, percent: session, color: sessionColor, size: 15, phaseOffset: 0)
-            drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.6)
+
+        switch formation {
+        case .stacked:
+            // Concentric: session outer (radius 61), weekly inner (radius 47)
+            drawRing(context: context, center: center, radius: 61, width: 7.5, percent: session, color: sessionColor)
+            drawRing(context: context, center: center, radius: 47, width: 6.0, percent: weekly, color: weeklyColor)
+            if displayMode == .pulse {
+                drawPulse(context: context, center: center, radius: 61, percent: session, color: sessionColor, size: 15, phaseOffset: 0)
+                drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.6)
+            }
+        case .split:
+            // Same radius, vertically bisected: session right half (clockwise
+            // from 12 o'clock), weekly left half (counter-clockwise).
+            // 100% fills its half-circle from top to bottom.
+            let r: CGFloat = 56
+            drawRing(context: context, center: center, radius: r, width: 7.0, percent: session, color: sessionColor,
+                     maxSweep: .pi, clockwise: true)
+            drawRing(context: context, center: center, radius: r, width: 7.0, percent: weekly, color: weeklyColor,
+                     maxSweep: .pi, clockwise: false)
+            if displayMode == .pulse {
+                drawPulse(context: context, center: center, radius: r, percent: session, color: sessionColor, size: 13, phaseOffset: 0,
+                          maxSweep: .pi, clockwise: true)
+                drawPulse(context: context, center: center, radius: r, percent: weekly, color: weeklyColor, size: 13, phaseOffset: 0.6,
+                          maxSweep: .pi, clockwise: false)
+            }
         }
 
         if isHovering {
@@ -627,6 +652,10 @@ final class HaloView: NSView {
         DisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .pulse
     }
 
+    private var formation: Formation {
+        Formation(rawValue: UserDefaults.standard.string(forKey: "formation") ?? "") ?? .stacked
+    }
+
     private var usageMetric: UsageMetric {
         UsageMetric(rawValue: UserDefaults.standard.string(forKey: "usageMetric") ?? "") ?? .used
     }
@@ -640,32 +669,31 @@ final class HaloView: NSView {
         }
     }
 
-    private func drawRing(context: CGContext, center: CGPoint, radius: CGFloat, width: CGFloat, percent: Double, color: NSColor) {
+    private func drawRing(context: CGContext, center: CGPoint, radius: CGFloat, width: CGFloat, percent: Double, color: NSColor, startAngle: CGFloat = .pi / 2, maxSweep: CGFloat = .pi * 2, clockwise: Bool = true) {
         context.saveGState()
         context.setLineCap(.round)
         context.setLineWidth(width)
         context.setShadow(offset: .zero, blur: 10, color: color.withAlphaComponent(0.58).cgColor)
         context.setStrokeColor(color.cgColor)
-        let start = CGFloat.pi / 2
-        let end = start - CGFloat.pi * 2 * CGFloat(percent / 100)
-        context.addArc(center: center, radius: radius, startAngle: start, endAngle: end, clockwise: true)
+        let sweep = maxSweep * CGFloat(percent / 100)
+        let end = clockwise ? startAngle - sweep : startAngle + sweep
+        context.addArc(center: center, radius: radius, startAngle: startAngle, endAngle: end, clockwise: clockwise)
         context.strokePath()
         context.restoreGState()
     }
 
-    private func drawPulse(context: CGContext, center: CGPoint, radius: CGFloat, percent: Double, color: NSColor, size: CGFloat, phaseOffset: TimeInterval) {
+    private func drawPulse(context: CGContext, center: CGPoint, radius: CGFloat, percent: Double, color: NSColor, size: CGFloat, phaseOffset: TimeInterval, startAngle: CGFloat = .pi / 2, maxSweep: CGFloat = .pi * 2, clockwise: Bool = true) {
         let elapsed = Date().timeIntervalSince(animationStart) + phaseOffset
 
-        // The wave runs along the SAME arc as the static ring fill: from 12
-        // o'clock clockwise for `percent` of the full circle. New beats
-        // emerge at the leading edge (the percent endpoint, where the orb
-        // used to live) and scroll back toward the start (top).
+        // The wave runs along the SAME arc as the static ring fill: from
+        // `startAngle` for `percent` of `maxSweep`. New beats emerge at the
+        // leading edge (the percent endpoint, where the orb used to live)
+        // and scroll back toward the start.
         let percentClamped = max(0.0, min(100.0, percent)) / 100.0
         guard percentClamped > 0.005 else { return }  // nothing to draw at ~0%
 
         let cycle: TimeInterval = 1.2
-        let arcSpan: CGFloat = CGFloat(percentClamped) * .pi * 2
-        let startAngle: CGFloat = .pi / 2  // top of the ring (matches drawRing)
+        let arcSpan: CGFloat = CGFloat(percentClamped) * maxSweep
         // Beat density: ~45° of arc per heartbeat. scrollDuration scales with
         // arcSpan so the wavelength stays visually constant regardless of %.
         let wavelength: CGFloat = .pi / 4
@@ -686,8 +714,10 @@ final class HaloView: NSView {
         var points: [CGPoint] = []
         points.reserveCapacity(pointsCount + 1)
         for i in 0...pointsCount {
-            let frac = Double(i) / Double(pointsCount)        // 0 (top, oldest) .. 1 (percent endpoint, newest)
-            let pointAngle = startAngle - arcSpan * CGFloat(frac)
+            let frac = Double(i) / Double(pointsCount)        // 0 (oldest, at startAngle) .. 1 (newest, at percent endpoint)
+            let pointAngle = clockwise
+                ? startAngle - arcSpan * CGFloat(frac)
+                : startAngle + arcSpan * CGFloat(frac)
             let timeOffset = -(1.0 - frac) * scrollDuration
             let t = elapsed + timeOffset
             var raw = t.truncatingRemainder(dividingBy: cycle) / cycle
@@ -835,6 +865,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private weak var haloView: HaloView?
     private var pulseModeItem: NSMenuItem?
+    private var stackedFormationItem: NSMenuItem?
+    private var splitFormationItem: NSMenuItem?
     private var ringModeItem: NSMenuItem?
     private var usedMetricItem: NSMenuItem?
     private var leftMetricItem: NSMenuItem?
@@ -902,6 +934,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(ringItem)
         menu.addItem(.separator())
 
+        let stackedItem = NSMenuItem(title: "Stacked rings", action: #selector(setStackedFormation), keyEquivalent: "")
+        let splitItem = NSMenuItem(title: "Split rings (week ◐ session)", action: #selector(setSplitFormation), keyEquivalent: "")
+        menu.addItem(stackedItem)
+        menu.addItem(splitItem)
+        menu.addItem(.separator())
+
         let usedItem = NSMenuItem(title: "Show used", action: #selector(setUsedMetric), keyEquivalent: "")
         let leftItem = NSMenuItem(title: "Show left", action: #selector(setLeftMetric), keyEquivalent: "")
         menu.addItem(usedItem)
@@ -922,6 +960,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = item
         pulseModeItem = pulseItem
         ringModeItem = ringItem
+        stackedFormationItem = stackedItem
+        splitFormationItem = splitItem
         usedMetricItem = usedItem
         leftMetricItem = leftItem
         updateMenuState()
@@ -991,6 +1031,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateSettings()
     }
 
+    @objc private func setStackedFormation() {
+        UserDefaults.standard.set(Formation.stacked.rawValue, forKey: "formation")
+        updateSettings()
+    }
+
+    @objc private func setSplitFormation() {
+        UserDefaults.standard.set(Formation.split.rawValue, forKey: "formation")
+        updateSettings()
+    }
+
     @objc private func setUsedMetric() {
         UserDefaults.standard.set(UsageMetric.used.rawValue, forKey: "usageMetric")
         updateSettings()
@@ -1009,10 +1059,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateMenuState() {
         let mode = DisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .pulse
         let metric = UsageMetric(rawValue: UserDefaults.standard.string(forKey: "usageMetric") ?? "") ?? .used
+        let formation = Formation(rawValue: UserDefaults.standard.string(forKey: "formation") ?? "") ?? .stacked
         pulseModeItem?.state = mode == .pulse ? .on : .off
         ringModeItem?.state = mode == .ring ? .on : .off
         usedMetricItem?.state = metric == .used ? .on : .off
         leftMetricItem?.state = metric == .left ? .on : .off
+        stackedFormationItem?.state = formation == .stacked ? .on : .off
+        splitFormationItem?.state = formation == .split ? .on : .off
     }
 
     @objc private func quit() {
