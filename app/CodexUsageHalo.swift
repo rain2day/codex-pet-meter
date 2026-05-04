@@ -626,9 +626,9 @@ final class HaloView: NSView {
         // of phase. Each point along the strip samples the envelope at its
         // own time offset, producing a traveling-wave appearance.
         let cycle: TimeInterval = 1.2
-        let arcSpan: CGFloat = .pi / 5            // ~36° of the ring covered
-        let pointsCount = 80
-        let scrollDuration: TimeInterval = cycle  // full beat visible at once
+        let arcSpan: CGFloat = .pi * 2 / 3        // 120° of the ring covered
+        let pointsCount = 160
+        let scrollDuration: TimeInterval = cycle * 3  // 3 full beats visible at once
         let amp: CGFloat = size * 1.6
 
         // Sample envelope at a normalized phase 0..1
