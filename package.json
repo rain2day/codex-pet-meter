@@ -3,21 +3,12 @@
   "version": "0.1.0",
   "description": "Floating halo overlay showing OpenAI Codex usage on the pet mascot",
   "type": "module",
-  "main": "server.mjs",
+  "main": "install.mjs",
   "scripts": {
     "install-app": "node install.mjs install",
     "start": "node install.mjs start",
-    "reset": "node install.mjs reset",
     "status": "node install.mjs status",
-    "uninstall": "node install.mjs uninstall",
-    "trace": "node install.mjs trace",
-    "trace-stop": "node install.mjs trace-stop",
-    "install-server": "node install.mjs install-server",
-    "start-server": "node install.mjs start-server",
-    "stop-server": "node install.mjs stop-server",
-    "status-server": "node install.mjs status-server",
-    "uninstall-server": "node install.mjs uninstall-server",
-    "server": "node server.mjs"
+    "uninstall": "node install.mjs uninstall"
   },
   "engines": {
     "node": ">=20"

@@ -1,205 +1,233 @@
 import Cocoa
-import ApplicationServices
 
-// MARK: - AX-based pet tracker
+// MARK: - Codex state readers
 //
-// Subscribes to Codex's pet window via AXObserver/kAXMovedNotification so the
-// halo follows the pet in real-time without polling. Falls back silently if the
-// user denies Accessibility permission — HaloView's animation timer will then
-// poll CGWindowList instead.
-final class CodexPetTracker {
-    static let shared = CodexPetTracker()
+// File-based backend. Codex itself maintains:
+//   ~/.codex/.codex-global-state.json  — pet open/closed + sprite bounds
+//   ~/.codex/auth.json                 — OAuth tokens for live usage API
+//
+// Two readers poll those files (and the OpenAI usage endpoint) on their own
+// schedule and fan results out via callbacks. The view layer is unchanged.
+//
+// Why files instead of Accessibility API: Codex's Electron pet window slides
+// inward at screen edges and re-renders the sprite at a compensating offset
+// (so the sprite stays glued to the cursor while the window jumps). AX
+// reports the WINDOW position, not the SPRITE — so AX-based tracking would
+// see the halo "bounce away" at edges. Codex's own state file already
+// publishes the sprite's logical rect, so we read that directly. Bonus:
+// no Accessibility permission required, no calibration needed, no edge-case
+// cursor-tracking workaround.
 
-    var onUpdate: ((NSRect) -> Void)?
-    var isConnected: Bool { observedWindow != nil }
+private let petPollInterval: TimeInterval = 0.1
+private let usagePollInterval: TimeInterval = 60
+private let oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"  // OpenAI's public Codex client id
+private let usageEndpoint = "https://chatgpt.com/backend-api/wham/usage"
+private let refreshEndpoint = "https://auth.openai.com/oauth/token"
 
-    private var observer: AXObserver?
-    private var observedWindow: AXUIElement?
-    private var observedAppPID: pid_t = 0
-    private var hasPermission = false
-    private var recheckTimer: Timer?
+private func codexHomePath() -> String {
+    if let envHome = ProcessInfo.processInfo.environment["CODEX_HOME"], !envHome.isEmpty {
+        return envHome
+    }
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex").path
+}
 
-    func start(onUpdate: @escaping (NSRect) -> Void) {
-        self.onUpdate = onUpdate
-        ensurePermission(prompt: true)
-        attachToCodex()
+private func cgFloat(_ value: Any?) -> CGFloat? {
+    if let n = value as? NSNumber { return CGFloat(truncating: n) }
+    if let d = value as? Double { return CGFloat(d) }
+    if let i = value as? Int { return CGFloat(i) }
+    return nil
+}
 
-        let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(self, selector: #selector(appLaunched(_:)),
-                       name: NSWorkspace.didLaunchApplicationNotification, object: nil)
-        nc.addObserver(self, selector: #selector(appTerminated(_:)),
-                       name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+// Reads ~/.codex/.codex-global-state.json on a fast timer and emits the
+// current sprite rect (in CGWindow top-left screen coords) — or nil when
+// the pet is hidden. Only emits when the rect changes, to avoid redrawing
+// on every poll.
+final class CodexStateReader {
+    static let shared = CodexStateReader()
 
-        // Periodic re-check covers: AX permission granted later, Codex pet
-        // window appearing after launch delay, AX subscription going stale.
-        // 1s interval gives fast self-recovery if a fast drag burst desynced
-        // the AX observer.
-        recheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.recheck()
-        }
+    var onPetUpdate: ((NSRect?) -> Void)?
+
+    private let stateFilePath: String
+    private var timer: Timer?
+    private var lastRect: NSRect?
+    private var lastWasOpen: Bool?
+
+    init() {
+        stateFilePath = codexHomePath() + "/.codex-global-state.json"
     }
 
-    @discardableResult
-    private func ensurePermission(prompt: Bool) -> Bool {
-        let prev = hasPermission
-        if prompt {
-            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue()
-            hasPermission = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        } else {
-            hasPermission = AXIsProcessTrusted()
+    func start(onPetUpdate: @escaping (NSRect?) -> Void) {
+        self.onPetUpdate = onPetUpdate
+        timer = Timer.scheduledTimer(withTimeInterval: petPollInterval, repeats: true) { [weak self] _ in
+            self?.poll()
         }
-        if prev != hasPermission {
-            debugLog("AX permission changed: \(prev) → \(hasPermission)")
-        } else if prompt {
-            debugLog("AX permission at launch: \(hasPermission)")
-        }
-        return hasPermission
+        poll()  // immediate first read
     }
 
-    @objc private func appLaunched(_ note: Notification) {
-        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              isCodex(app) else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.attachToCodex() }
+    private func poll() {
+        let snapshot = readSpriteRect()
+        // Edge-trigger: only emit on change.
+        let isOpen = (snapshot != nil)
+        if isOpen == lastWasOpen, snapshot == lastRect { return }
+        lastRect = snapshot
+        lastWasOpen = isOpen
+        let sendRect = snapshot
+        DispatchQueue.main.async { [weak self] in self?.onPetUpdate?(sendRect) }
     }
 
-    @objc private func appTerminated(_ note: Notification) {
-        guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.processIdentifier == observedAppPID else { return }
-        teardown()
-    }
-
-    private func teardown() {
-        if let obs = observer {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(),
-                                  AXObserverGetRunLoopSource(obs), .commonModes)
+    private func readSpriteRect() -> NSRect? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: stateFilePath)),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
         }
-        observer = nil
-        observedWindow = nil
-        observedAppPID = 0
-    }
-
-    private func recheck() {
-        if !hasPermission { ensurePermission(prompt: false) }
-        guard let win = observedWindow else {
-            traceLog("ax-recheck", "noObservedWindow attemptingAttach")
-            attachToCodex()
-            return
+        let isOpen: Bool = {
+            if let b = root["electron-avatar-overlay-open"] as? Bool { return b }
+            if let n = root["electron-avatar-overlay-open"] as? NSNumber { return n.boolValue }
+            return false
+        }()
+        guard isOpen,
+              let bounds = root["electron-avatar-overlay-bounds"] as? [String: Any],
+              let x = cgFloat(bounds["x"]),
+              let y = cgFloat(bounds["y"]),
+              let mascot = bounds["mascot"] as? [String: Any],
+              let mLeft = cgFloat(mascot["left"]),
+              let mTop = cgFloat(mascot["top"]),
+              let mWidth = cgFloat(mascot["width"]),
+              let mHeight = cgFloat(mascot["height"]) else {
+            return nil
         }
-        // Active re-find: even if our handle still answers, the smallest matching
-        // window may have changed (e.g. Codex destroyed/recreated the pet
-        // container). Compare references and resubscribe on mismatch.
-        if let app = NSWorkspace.shared.runningApplications.first(where: isCodex) {
-            let axApp = AXUIElementCreateApplication(app.processIdentifier)
-            if let freshWin = findPetWindow(axApp: axApp) {
-                let isSame = CFEqual(freshWin, win)
-                traceLog("ax-recheck", "handleAlive=true sameWindow=\(isSame) freshFound=true")
-                if !isSame {
-                    teardown()
-                    attachToCodex()
-                    return
-                }
-            } else {
-                traceLog("ax-recheck", "handleAlive=true sameWindow=? freshFound=false")
-            }
-        } else {
-            traceLog("ax-recheck", "codexNotRunning checkingLiveness")
-        }
-        var ref: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &ref)
-        if err != .success {
-            traceLog("ax-recheck", "handleAlive=false err=\(err.rawValue)")
-            teardown()
-            attachToCodex()
-        } else {
-            emit(source: "recheck")
-        }
-    }
-
-    private func isCodex(_ app: NSRunningApplication) -> Bool {
-        app.bundleIdentifier == "com.openai.codex"
-    }
-
-    private func attachToCodex() {
-        guard hasPermission else {
-            debugLog("attach skipped: no AX permission")
-            return
-        }
-        guard let app = NSWorkspace.shared.runningApplications.first(where: isCodex) else {
-            debugLog("attach skipped: Codex not running")
-            return
-        }
-        let pid = app.processIdentifier
-        let axApp = AXUIElementCreateApplication(pid)
-        guard let win = findPetWindow(axApp: axApp) else {
-            debugLog("attach skipped: no matching pet window in Codex pid=\(pid)")
-            return
-        }
-        teardown()
-        observedAppPID = pid
-        observedWindow = win
-        subscribe(window: win, app: axApp, pid: pid)
-        emit(source: "attach")
-        debugLog("AX attached pid=\(pid)")
-    }
-
-    private func findPetWindow(axApp: AXUIElement) -> AXUIElement? {
-        var winsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winsRef) == .success,
-              let wins = winsRef as? [AXUIElement] else { return nil }
-        var matches: [(AXUIElement, CGFloat)] = []
-        for win in wins {
-            var sizeRef: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
-                  let sv = sizeRef else { continue }
-            var size = CGSize.zero
-            guard CFGetTypeID(sv) == AXValueGetTypeID() else { continue }
-            let sval = sv as! AXValue
-            guard AXValueGetValue(sval, .cgSize, &size) else { continue }
-            // Widened from 300-430 / 250-390 in case Codex slightly resizes the
-            // pet container near screen edges or on different display scales.
-            if size.width >= 250, size.width <= 480, size.height >= 220, size.height <= 420 {
-                matches.append((win, size.width * size.height))
-            }
-        }
-        // Prefer the smallest matching window (the pet container, not a chat panel)
-        return matches.sorted(by: { $0.1 < $1.1 }).first?.0
-    }
-
-    private func subscribe(window: AXUIElement, app: AXUIElement, pid: pid_t) {
-        var obs: AXObserver?
-        let cb: AXObserverCallback = { _, _, _, refcon in
-            guard let refcon else { return }
-            Unmanaged<CodexPetTracker>.fromOpaque(refcon).takeUnretainedValue().emit(source: "callback")
-        }
-        guard AXObserverCreate(pid, cb, &obs) == .success, let obs else { return }
-        observer = obs
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let r1 = AXObserverAddNotification(obs, window, kAXMovedNotification as CFString, refcon)
-        let r2 = AXObserverAddNotification(obs, window, kAXResizedNotification as CFString, refcon)
-        traceLog("ax-subscribe", "moved=\(r1.rawValue) resized=\(r2.rawValue) pid=\(pid)")
-        CFRunLoopAddSource(CFRunLoopGetCurrent(),
-                           AXObserverGetRunLoopSource(obs), .commonModes)
-    }
-
-    private func emit(source: String) {
-        guard let win = observedWindow else { return }
-        var posRef: CFTypeRef?, sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let pv = posRef, let sv = sizeRef else { return }
-        var pos = CGPoint.zero, size = CGSize.zero
-        guard CFGetTypeID(pv) == AXValueGetTypeID(),
-              CFGetTypeID(sv) == AXValueGetTypeID() else { return }
-        let pval = pv as! AXValue
-        let sval = sv as! AXValue
-        guard AXValueGetValue(pval, .cgPoint, &pos),
-              AXValueGetValue(sval, .cgSize, &size) else { return }
-        // AX returns position in screen top-left coordinates (same as CGWindow).
-        let rect = NSRect(origin: pos, size: size)
-        traceLog("ax-fire", "src=\(source) petX=\(pos.x) petY=\(pos.y) petW=\(size.width) petH=\(size.height)")
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?(rect) }
+        return NSRect(x: x + mLeft, y: y + mTop, width: mWidth, height: mHeight)
     }
 }
+
+// Fetches usage data directly from chatgpt.com/backend-api/wham/usage using
+// the access token from ~/.codex/auth.json. Refreshes the token via OAuth
+// on 401/403. Polls every 60 seconds. Result is fanned out via callback.
+final class CodexUsageReader {
+    static let shared = CodexUsageReader()
+
+    /// Callback args: session %, weekly %, session resetsAt date.
+    var onUsageUpdate: ((Double, Double, Date?) -> Void)?
+
+    private let authFilePath: String
+    private var timer: Timer?
+
+    init() {
+        authFilePath = codexHomePath() + "/auth.json"
+    }
+
+    func start(onUsageUpdate: @escaping (Double, Double, Date?) -> Void) {
+        self.onUsageUpdate = onUsageUpdate
+        timer = Timer.scheduledTimer(withTimeInterval: usagePollInterval, repeats: true) { [weak self] _ in
+            self?.fetch()
+        }
+        fetch()  // immediate first read
+    }
+
+    private func fetch() {
+        guard let auth = readAuth(),
+              let tokens = auth["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String else {
+            return
+        }
+        request(accessToken: accessToken, accountId: tokens["account_id"] as? String, retry: true)
+    }
+
+    private func readAuth() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: authFilePath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    private func request(accessToken: String, accountId: String?, retry: Bool) {
+        guard let url = URL(string: usageEndpoint) else { return }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("CodexPetMeter", forHTTPHeaderField: "User-Agent")
+        if let accountId { req.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id") }
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, _ in
+            guard let self else { return }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (status == 401 || status == 403) && retry {
+                self.refreshTokenAndRetry()
+                return
+            }
+            guard status >= 200, status < 300, let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return
+            }
+            self.parseAndEmit(json)
+        }.resume()
+    }
+
+    private func refreshTokenAndRetry() {
+        guard var auth = readAuth(),
+              var tokens = auth["tokens"] as? [String: Any],
+              let refreshToken = tokens["refresh_token"] as? String,
+              let url = URL(string: refreshEndpoint) else {
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        let body = "grant_type=refresh_token&client_id=\(oauthClientID)&refresh_token=\(refreshToken)"
+        req.httpBody = body.data(using: .utf8)
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, _ in
+            guard let self,
+                  let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let newAccess = json["access_token"] as? String,
+                  let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode >= 200, httpResponse.statusCode < 300 else {
+                return
+            }
+            tokens["access_token"] = newAccess
+            if let newRefresh = json["refresh_token"] as? String { tokens["refresh_token"] = newRefresh }
+            if let newId = json["id_token"] as? String { tokens["id_token"] = newId }
+            auth["tokens"] = tokens
+            auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+            if let serialized = try? JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted]) {
+                try? serialized.write(to: URL(fileURLWithPath: self.authFilePath))
+            }
+            self.request(accessToken: newAccess, accountId: tokens["account_id"] as? String, retry: false)
+        }.resume()
+    }
+
+    private func parseAndEmit(_ json: [String: Any]) {
+        let rateLimit = json["rate_limit"] as? [String: Any] ?? [:]
+        let primary = rateLimit["primary_window"] as? [String: Any] ?? rateLimit["primary"] as? [String: Any]
+        let secondary = rateLimit["secondary_window"] as? [String: Any] ?? rateLimit["secondary"] as? [String: Any]
+
+        let session = clamp((primary?["used_percent"] as? NSNumber)?.doubleValue ?? 0)
+        let weekly = clamp((secondary?["used_percent"] as? NSNumber)?.doubleValue ?? 0)
+        let resetsAt = parseReset(primary)
+        debugLog("usage session=\(session)% weekly=\(weekly)% resetsAt=\(resetsAt?.description ?? "nil")")
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onUsageUpdate?(session, weekly, resetsAt)
+        }
+    }
+
+    private func parseReset(_ window: [String: Any]?) -> Date? {
+        guard let window else { return nil }
+        if let resetAt = window["reset_at"] as? NSNumber {
+            return Date(timeIntervalSince1970: resetAt.doubleValue)
+        }
+        if let resetAfter = window["reset_after_seconds"] as? NSNumber {
+            return Date(timeIntervalSinceNow: resetAfter.doubleValue)
+        }
+        return nil
+    }
+
+    private func clamp(_ value: Double) -> Double {
+        min(100, max(0, value))
+    }
+}
+
 
 func debugLog(_ message: String) {
     let line = "\(Date()) \(message)\n"
@@ -247,17 +275,6 @@ func traceLog(_ tag: String, _ kvs: @autoclosure () -> String) {
     }
 }
 
-struct UsageResponse: Decodable {
-    struct WindowUsage: Decodable {
-        let usedPercent: Double?
-        let resetsAt: String?
-    }
-
-    let ok: Bool
-    let session: WindowUsage?
-    let weekly: WindowUsage?
-}
-
 final class HaloWindow: NSWindow {
     override var canBecomeMain: Bool { false }
     // Disable AppKit's automatic "keep title bar visible" frame constraint so
@@ -291,41 +308,11 @@ final class HaloView: NSView {
     private var animationStart = Date()
     private var animationTimer: Timer?
     private var refreshTimer: Timer?
-    private var dragStartScreenPoint: NSPoint?
-    private var dragStartWindowOrigin: NSPoint?
-    private var isDragging = false
-    private var followTick: Int = 0
-    // Cursor-tracking mode: when user is dragging the Codex pet itself
-    // (mouse-down inside Codex's pet window), we follow the cursor directly
-    // instead of AX-reported window position. This bypasses Codex's edge
-    // teleport behavior — Codex slides its window back into screen at edges
-    // and re-renders the sprite to compensate, so the sprite stays glued to
-    // the cursor while the window jumps. Tracking the cursor keeps the halo
-    // glued to the visible sprite no matter how Codex moves its window.
-    private var globalMouseMonitor: Any?
-    private var dragCursorOffset: NSPoint?
-    // Server emits timestamps with fractional seconds (e.g. "...:37.000Z").
-    // Default ISO8601DateFormatter only parses without fractional seconds and
-    // returns nil otherwise — explicitly opt in.
-    private let isoFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-    // Fallback for timestamps without fractional seconds.
-    private let isoFormatterPlain: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
-
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         addTimers()
-        installGlobalMouseMonitor()
-        refreshUsage()
     }
 
     required init?(coder: NSCoder) {
@@ -335,63 +322,6 @@ final class HaloView: NSView {
     deinit {
         animationTimer?.invalidate()
         refreshTimer?.invalidate()
-        if let monitor = globalMouseMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
-    }
-
-    private func installGlobalMouseMonitor() {
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
-        ) { [weak self] event in
-            guard let self else { return }
-            switch event.type {
-            case .leftMouseDown:
-                self.startCursorTrackingIfOnPet()
-            case .leftMouseDragged:
-                self.followCursorIfTracking()
-            case .leftMouseUp:
-                self.endCursorTracking()
-            default:
-                break
-            }
-        }
-    }
-
-    private func startCursorTrackingIfOnPet() {
-        guard let halo = window else { return }
-        let cursor = NSEvent.mouseLocation  // AppKit bottom-left coords
-        guard let petRectCG = HaloView.codexPetWindowRect() else { return }
-        // petRectCG is in CGWindow top-left coords. Convert cursor to match.
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 1080
-        let cursorCG = NSPoint(x: cursor.x, y: primaryHeight - cursor.y)
-        guard petRectCG.contains(cursorCG) else { return }
-        // Lock in the offset between cursor and halo origin at click time so
-        // the relative position the user picked is preserved throughout drag.
-        let haloOrigin = halo.frame.origin
-        dragCursorOffset = NSPoint(x: cursor.x - haloOrigin.x, y: cursor.y - haloOrigin.y)
-        traceLog("cursor-track-start",
-                 "cursorX=\(cursor.x) cursorY=\(cursor.y) haloX=\(haloOrigin.x) haloY=\(haloOrigin.y) offsetX=\(dragCursorOffset!.x) offsetY=\(dragCursorOffset!.y)")
-    }
-
-    private func followCursorIfTracking() {
-        guard let offset = dragCursorOffset, let halo = window else { return }
-        let cursor = NSEvent.mouseLocation
-        let newOrigin = NSPoint(x: cursor.x - offset.x, y: cursor.y - offset.y)
-        halo.setFrameOrigin(newOrigin)
-    }
-
-    private func endCursorTracking() {
-        guard dragCursorOffset != nil else { return }
-        dragCursorOffset = nil
-        // Auto-recalibrate so the formula-driven AX tracking that resumes now
-        // computes the same position the halo is currently at (i.e. where the
-        // user just dragged the sprite to). Without this, the next AX event
-        // would snap the halo to the formula's pre-drag target — which may
-        // have been displaced by Codex's edge teleport during the drag —
-        // producing the "halo bounces away on release" symptom.
-        calibrateMascotAnchorFromCurrentPosition()
-        traceLog("cursor-track-end", "auto-recalibrated")
     }
 
     override var isFlipped: Bool { false }
@@ -428,61 +358,10 @@ final class HaloView: NSView {
         needsDisplay = true
     }
 
-    override func mouseDown(with event: NSEvent) {
-        isDragging = true
-        dragStartScreenPoint = NSEvent.mouseLocation
-        dragStartWindowOrigin = window?.frame.origin
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let window, let dragStartScreenPoint, let dragStartWindowOrigin else { return }
-        let now = NSEvent.mouseLocation
-        let dx = now.x - dragStartScreenPoint.x
-        let dy = now.y - dragStartScreenPoint.y
-        window.setFrameOrigin(NSPoint(x: dragStartWindowOrigin.x + dx, y: dragStartWindowOrigin.y + dy))
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        // If the user actually dragged the halo (>= 3 px), treat that as
-        // "calibration": save the new mascot anchor as a percentage of the
-        // Codex pet container. The halo's new position becomes its permanent
-        // anchor that follow-tracking will preserve as the pet moves.
-        let didDrag: Bool = {
-            guard let start = dragStartScreenPoint else { return false }
-            let now = NSEvent.mouseLocation
-            return hypot(now.x - start.x, now.y - start.y) >= 3
-        }()
-        isDragging = false
-        dragStartScreenPoint = nil
-        dragStartWindowOrigin = nil
-        if didDrag {
-            calibrateMascotAnchorFromCurrentPosition()
-        } else {
-            // No drag — snap any drift back to the saved anchor.
-            settleToPet()
-        }
-    }
-
-    /// Reads the halo window's current center, expresses it as a percentage of
-    /// the Codex pet container, and persists those percentages so that future
-    /// follow-tracking centers the halo there.
-    private func calibrateMascotAnchorFromCurrentPosition() {
-        guard let window, let pet = Self.codexPetWindowRect() else { return }
-        // Convert halo's AppKit frame back to CGWindow top-left coordinates.
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 1080
-        let haloCenterX = window.frame.midX
-        let haloCenterY_appkit = window.frame.midY
-        let haloCenterY_cg = primaryHeight - haloCenterY_appkit
-        guard pet.width > 0, pet.height > 0 else { return }
-        let pctX = (haloCenterX - pet.origin.x) / pet.width
-        let pctY = (haloCenterY_cg - pet.origin.y) / pet.height
-        // Sanity clamp — refuse outlandish values.
-        let clampedX = min(2.0, max(-1.0, pctX))
-        let clampedY = min(2.0, max(-1.0, pctY))
-        UserDefaults.standard.set(clampedX, forKey: "mascotPercentX")
-        UserDefaults.standard.set(clampedY, forKey: "mascotPercentY")
-        debugLog("calibrated mascot anchor pctX=\(clampedX) pctY=\(clampedY)")
-    }
+    /// Halo is no longer draggable — its position is determined entirely by
+    /// the sprite rect from CodexStateReader. Mouse-down absorbs the click so
+    /// it doesn't fall through.
+    override func mouseDown(with event: NSEvent) { /* no-op */ }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -564,90 +443,50 @@ final class HaloView: NSView {
     }
 
     private func addTimers() {
-        // 30Hz: orb animation redraw + adaptive polling.
-        //   AX off → poll every tick (30Hz, full speed).
-        //   AX on  → poll every 8th tick (~4Hz) as a safety net for missed
-        //            AX notifications (e.g. coalesced during very fast drags).
+        // 30Hz redraw — drives the EKG pulse animation. Pet-position updates
+        // and usage refreshes are handled by CodexStateReader / CodexUsageReader.
         animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.needsDisplay = true
-            self.followTick &+= 1
-            let interval = CodexPetTracker.shared.isConnected ? 8 : 1
-            if self.followTick % interval == 0 {
-                let rect = HaloView.codexPetWindowRect()
-                let rectStr = rect.map { "\($0.origin.x),\($0.origin.y),\($0.size.width),\($0.size.height)" } ?? "-"
-                traceLog("poll-tick", "tick=\(self.followTick) result=\(rect == nil ? "nil" : "ok") rect=\(rectStr) axConnected=\(CodexPetTracker.shared.isConnected)")
-                self.followCodexPetIfPossible()
-            }
-        }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.refreshUsage()
+            self?.needsDisplay = true
         }
     }
 
-    /// Called by `CodexPetTracker` whenever the Codex pet window moves/resizes.
-    /// `petRect` is the Codex pet container in screen top-left coordinates.
-    func applyPetWindowRect(_ petRect: NSRect) {
-        guard !isDragging, let window else { return }
-        // Cursor-tracking takes precedence — while user drags pet, halo
-        // follows cursor directly (see installGlobalMouseMonitor). AX-driven
-        // updates are silenced to avoid fighting Codex's edge teleports.
-        if dragCursorOffset != nil { return }
-        let target = Self.haloRect(forPetWindow: petRect)
+    /// File-backend entry: position the halo so it centers on the pet sprite.
+    /// `spriteRect` is the sprite in CGWindow top-left screen coords (or nil
+    /// when the pet is hidden).
+    func applySpriteRect(_ spriteRect: NSRect?) {
+        guard let window else { return }
+        guard let spriteRect else {
+            // Pet hidden — slide the halo offscreen by hiding the window.
+            window.orderOut(nil)
+            return
+        }
+        if !window.isVisible { window.orderFrontRegardless() }
 
-        // Convert CGWindow top-left target → AppKit bottom-left absolute frame.
-        // Using absolute positioning (no delta math) eliminates drift during
-        // fast drags, where CGWindowList snapshots of the halo's own position
-        // would otherwise lag reality and accumulate error.
-        let targetFrame = Self.cgWindowRectToAppKit(target)
+        // Halo center = sprite center. No calibration, no formula — Codex
+        // tells us the sprite's exact rect, so we just align centers.
+        let centerXcg = spriteRect.midX
+        let centerYcg = spriteRect.midY
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 1080
+        let centerYappkit = primaryHeight - centerYcg
+        let halfW = window.frame.width / 2
+        let halfH = window.frame.height / 2
+        let targetFrame = NSRect(x: centerXcg - halfW,
+                                 y: centerYappkit - halfH,
+                                 width: window.frame.width,
+                                 height: window.frame.height)
         let current = window.frame
         let distance = hypot(targetFrame.origin.x - current.origin.x,
                              targetFrame.origin.y - current.origin.y)
-
-        let action = distance < 0.5 ? "skip" : "snap"
-        traceLog("apply", "petX=\(petRect.origin.x) petY=\(petRect.origin.y) petW=\(petRect.width) petH=\(petRect.height) curX=\(current.origin.x) curY=\(current.origin.y) tgtX=\(targetFrame.origin.x) tgtY=\(targetFrame.origin.y) dist=\(Int(distance)) act=\(action)")
-
-        if action == "skip" { return }
-
-        // Always snap to absolute target. Direct setFrame is pixel-perfect
-        // and zero-latency. Codex's pet self-teleports at screen edges still
-        // cause halo to jump (because we faithfully follow), but that's
-        // Codex's behavior, not ours — user must decide whether to live with
-        // it or add a teleport-rejection layer.
+        if distance < 0.5 { return }
         window.setFrame(targetFrame, display: false)
-
-        // Read the actual frame back asynchronously. Useful while --trace is
-        // on for verifying no AppKit clamping is happening on this code path.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let w = self.window else { return }
-            traceLog("setframe-after",
-                     "reqX=\(targetFrame.origin.x) reqY=\(targetFrame.origin.y) actX=\(w.frame.origin.x) actY=\(w.frame.origin.y) act=\(action)")
-        }
     }
 
-    /// Convert a CGWindow-space rect (top-left origin) to an AppKit-space rect
-    /// (bottom-left origin) using the primary screen as anchor.
-    static func cgWindowRectToAppKit(_ rect: NSRect) -> NSRect {
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 1080
-        let appkitY = primaryHeight - rect.origin.y - rect.height
-        return NSRect(x: rect.origin.x, y: appkitY, width: rect.width, height: rect.height)
-    }
-
-    private func refreshUsage() {
-        guard let url = URL(string: "http://127.0.0.1:43741/api/usage") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let self, let data else { return }
-            guard let usage = try? JSONDecoder().decode(UsageResponse.self, from: data), usage.ok else { return }
-            DispatchQueue.main.async {
-                self.sessionPercent = Self.clamp(usage.session?.usedPercent ?? 0)
-                self.weeklyPercent = Self.clamp(usage.weekly?.usedPercent ?? 0)
-                if let resetsAt = usage.session?.resetsAt {
-                    self.resetsAt = self.isoFormatter.date(from: resetsAt)
-                        ?? self.isoFormatterPlain.date(from: resetsAt)
-                }
-                self.needsDisplay = true
-            }
-        }.resume()
+    /// File-backend entry: usage-data update from `CodexUsageReader`.
+    func applyUsage(session: Double, weekly: Double, resetsAt: Date?) {
+        sessionPercent = session
+        weeklyPercent = weekly
+        if let resetsAt { self.resetsAt = resetsAt }
+        needsDisplay = true
     }
 
     private static func clamp(_ value: Double) -> Double {
@@ -793,77 +632,6 @@ final class HaloView: NSView {
         return "\(s)s"
     }
 
-    private func persistWindowFrame() {
-        guard let frame = window?.frame else { return }
-        UserDefaults.standard.set(NSStringFromRect(frame), forKey: "haloWindowFrame")
-    }
-
-    private func followCodexPetIfPossible() {
-        guard let petRect = Self.codexPetWindowRect() else { return }
-        applyPetWindowRect(petRect)
-    }
-
-    private func settleToPet() {
-        followCodexPetIfPossible()
-        for delay in [0.08, 0.25, 0.75] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.followCodexPetIfPossible()
-            }
-        }
-    }
-
-    static func haloRect(forPetWindow rect: NSRect) -> NSRect {
-        // Per-user calibrated mascot anchor (set by dragging the halo onto the
-        // pet sprite). Falls back to factory defaults if not yet calibrated.
-        let defaults = UserDefaults.standard
-        let pctX = defaults.object(forKey: "mascotPercentX") as? Double ?? 0.817
-        let pctY = defaults.object(forKey: "mascotPercentY") as? Double ?? 0.670
-        let mascotCenterX = rect.origin.x + rect.width * CGFloat(pctX)
-        let mascotCenterY = rect.origin.y + rect.height * CGFloat(pctY)
-        return NSRect(x: mascotCenterX - 85, y: mascotCenterY - 85, width: 170, height: 170)
-    }
-
-    static func codexPetWindowRect() -> NSRect? {
-        let candidates = windowBounds(owner: "Codex")
-            .filter { item in
-                item.layer == 3 &&
-                item.rect.width >= 250 &&
-                item.rect.width <= 480 &&
-                item.rect.height >= 220 &&
-                item.rect.height <= 420
-            }
-        return candidates.sorted(by: { $0.rect.width * $0.rect.height < $1.rect.width * $1.rect.height }).first?.rect
-    }
-
-    private static func codexPetHaloBounds() -> NSRect? {
-        guard let petRect = codexPetWindowRect() else { return nil }
-        return haloRect(forPetWindow: petRect)
-    }
-
-    private static func haloWindowBounds() -> (rect: NSRect, layer: Int, name: String)? {
-        windowBounds(owner: "Codex Pet Meter").first ?? windowBounds(owner: "Codex Usage Halo").first
-    }
-
-    private static func windowBounds(owner: String) -> [(rect: NSRect, layer: Int, name: String)] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
-        }
-        return windows.compactMap { window in
-            guard (window[kCGWindowOwnerName as String] as? String) == owner,
-                  let bounds = window[kCGWindowBounds as String] as? [String: Any] else {
-                return nil
-            }
-            let x = CGFloat((bounds["X"] as? NSNumber)?.doubleValue ?? 0)
-            let y = CGFloat((bounds["Y"] as? NSNumber)?.doubleValue ?? 0)
-            let width = CGFloat((bounds["Width"] as? NSNumber)?.doubleValue ?? 0)
-            let height = CGFloat((bounds["Height"] as? NSNumber)?.doubleValue ?? 0)
-            guard width > 1, height > 1 else { return nil }
-            let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            let name = window[kCGWindowName as String] as? String ?? ""
-            return (NSRect(x: x, y: y, width: width, height: height), layer, name)
-        }
-    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -880,24 +648,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         debugLog("applicationDidFinishLaunching args=\(CommandLine.arguments)")
         NSApp.setActivationPolicy(.accessory)
-        if CommandLine.arguments.contains("--reset-position") {
-            UserDefaults.standard.removeObject(forKey: "haloWindowFrame")
-            UserDefaults.standard.removeObject(forKey: "haloFollowOffset")
-        }
         createStatusItem()
         createWindow()
-        // Real-time pet tracking via Accessibility API. Requires user grant
-        // (System Settings → Privacy & Security → Accessibility). Falls back to
-        // 30Hz CGWindowList polling if denied.
-        CodexPetTracker.shared.start { [weak self] petRect in
-            self?.haloView?.applyPetWindowRect(petRect)
+        // File-backend tracking: poll Codex's own state file for sprite rect
+        // and OAuth-fetch usage from the upstream API every minute. No
+        // Accessibility permission, no calibration, no helper server needed.
+        CodexStateReader.shared.start { [weak self] spriteRect in
+            self?.haloView?.applySpriteRect(spriteRect)
+        }
+        CodexUsageReader.shared.start { [weak self] session, weekly, resetsAt in
+            self?.haloView?.applyUsage(session: session, weekly: weekly, resetsAt: resetsAt)
         }
     }
 
     private func createWindow() {
-        let defaultFrame = Self.defaultWindowFrame()
-        let stored = UserDefaults.standard.string(forKey: "haloWindowFrame").map(NSRectFromString)
-        let frame = stored?.isEmpty == false ? stored! : defaultFrame
+        // Initial frame is irrelevant — the file reader repositions the halo
+        // onto the pet sprite within 100ms of launch.
+        let frame = Self.defaultWindowFrame()
         debugLog("createWindow frame=\(NSStringFromRect(frame))")
         let panel = HaloWindow(
             contentRect: frame,
@@ -958,8 +725,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(title: "Show meter", action: #selector(showHalo), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Reset position", action: #selector(resetPosition), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Reset calibration", action: #selector(resetCalibration), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
@@ -977,18 +742,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window?.orderFrontRegardless()
     }
 
-    @objc private func resetPosition() {
-        UserDefaults.standard.removeObject(forKey: "haloWindowFrame")
-        UserDefaults.standard.removeObject(forKey: "haloFollowOffset")
-        window?.setFrame(Self.defaultWindowFrame(), display: true)
-        window?.orderFrontRegardless()
-    }
-
-    @objc private func resetCalibration() {
-        UserDefaults.standard.removeObject(forKey: "mascotPercentX")
-        UserDefaults.standard.removeObject(forKey: "mascotPercentY")
-        haloView?.reloadSettings()
-    }
 
     // Color customization. NSColorPanel is shared app-wide; we route its color
     // changes to either the session or weekly key based on which menu item the
