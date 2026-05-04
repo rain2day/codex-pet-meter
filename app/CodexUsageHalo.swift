@@ -1020,17 +1020,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             image.unlockFocus()
             return image
         }
+        // Pure-black strokes paired with isTemplate = true so macOS auto-tints
+        // the icon: white in dark menu bar, black in light menu bar, and
+        // appropriate inverted color when the menu is highlighted.
         context.setLineCap(.round)
+        context.setStrokeColor(NSColor.black.cgColor)
         context.setLineWidth(2)
-        context.setStrokeColor(NSColor(calibratedRed: 0.30, green: 0.91, blue: 0.82, alpha: 1).cgColor)
-        context.addArc(center: CGPoint(x: 10, y: 9), radius: 6.5, startAngle: CGFloat.pi / 2, endAngle: CGFloat.pi / 2 - CGFloat.pi * 1.45, clockwise: true)
+        context.addArc(center: CGPoint(x: 10, y: 9), radius: 6.5,
+                       startAngle: CGFloat.pi / 2,
+                       endAngle: CGFloat.pi / 2 - CGFloat.pi * 1.45,
+                       clockwise: true)
         context.strokePath()
         context.setLineWidth(1.7)
-        context.setStrokeColor(NSColor(calibratedRed: 1.00, green: 0.75, blue: 0.31, alpha: 1).cgColor)
-        context.addArc(center: CGPoint(x: 10, y: 9), radius: 4.0, startAngle: CGFloat.pi / 2, endAngle: CGFloat.pi / 2 - CGFloat.pi * 1.0, clockwise: true)
+        context.addArc(center: CGPoint(x: 10, y: 9), radius: 4.0,
+                       startAngle: CGFloat.pi / 2,
+                       endAngle: CGFloat.pi / 2 - CGFloat.pi * 1.0,
+                       clockwise: true)
         context.strokePath()
         image.unlockFocus()
-        image.isTemplate = false
+        image.isTemplate = true
         return image
     }
 }
