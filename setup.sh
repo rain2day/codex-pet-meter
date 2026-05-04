@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot installer for Codex Pet Meter.
-# Builds the macOS app, installs it to ~/Applications, and starts the usage server.
-# Re-runnable.
+# Builds the macOS app, installs a server LaunchAgent (auto-starts the usage
+# server at login), and starts both. Re-runnable.
 
 set -euo pipefail
 
@@ -30,25 +30,25 @@ if [ ! -f "$CODEX_AUTH" ]; then
     echo "         Run 'codex login' first, or the usage server will return errors." >&2
 fi
 
-echo "==> Building and installing Codex Pet Meter.app"
+echo "==> Building app, installing server LaunchAgent, starting both"
 node install.mjs install
 
 echo
-echo "==> Starting usage server (background)"
-nohup node server.mjs >/tmp/codex-pet-meter-server.log 2>&1 &
-SERVER_PID=$!
-echo "Server PID: $SERVER_PID (logs at /tmp/codex-pet-meter-server.log)"
-
-sleep 1
-if curl -sS -m 2 http://127.0.0.1:43741/api/usage >/dev/null 2>&1; then
+echo "==> Verifying server is reachable"
+sleep 2
+if curl -sS -m 3 http://127.0.0.1:43741/api/usage >/dev/null 2>&1; then
     echo "Server is reachable on http://127.0.0.1:43741"
 else
-    echo "Warning: server is not yet reachable. Check /tmp/codex-pet-meter-server.log" >&2
+    echo "Warning: server is not yet reachable. Check ${TMPDIR:-/tmp}/codex-pet-meter-server.log" >&2
+    echo "         Or run: node install.mjs status-server" >&2
 fi
 
 cat <<'EOF'
 
 ==> Setup complete!
+
+The server is running under launchd and will auto-start every login.
+The Pet Meter app is in ~/Applications and was just launched.
 
 Next steps (manual, only on first run):
 
@@ -59,14 +59,13 @@ Next steps (manual, only on first run):
   2. Drag the halo (the two rings) onto the Codex pet sprite.
      When you release, the halo auto-saves the relative position.
 
-To stop everything:
-  pkill -f CodexPetMeter
-  pkill -f "node.*server.mjs"
-
-To uninstall:
-  node install.mjs uninstall
+Useful commands:
+  node install.mjs status            # is the app running?
+  node install.mjs status-server     # is the server loaded?
+  node install.mjs uninstall         # remove everything
 
 Diagnostic logs:
-  tail -f /tmp/codex-usage-halo.log
+  tail -f /tmp/codex-usage-halo.log         # app
+  tail -f /tmp/codex-pet-meter-server.log   # server (managed by launchd)
 
 EOF

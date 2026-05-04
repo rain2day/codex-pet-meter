@@ -8,14 +8,17 @@ A floating halo overlay that wraps the OpenAI **Codex** desktop app's pet mascot
 - **Drag** the halo to reposition it relative to your pet sprite (auto-calibrates)
 - Follows the pet 1:1 in real time using the macOS Accessibility API
 
-> Status: works on macOS 13+. Requires the OpenAI Codex desktop app and Node.js.
+> Status: works on macOS 13+. **Source install only — no prebuilt release yet.**
+> Requires the OpenAI Codex desktop app, Node.js 20+, and Xcode Command Line Tools.
+> A signed `.dmg` release is on the roadmap; for now you build it locally.
 
 ## How it works
 
-Two pieces:
+Three pieces:
 
 1. **`server.mjs`** — tiny local HTTP server that reads your Codex auth token from `~/.codex/auth.json` and proxies the OpenAI usage endpoint at `http://127.0.0.1:43741/api/usage`.
 2. **`Codex Pet Meter.app`** — a borderless `LSUIElement` Swift app that draws the halo, follows the Codex pet via the Accessibility API, and polls the server every 60 seconds for usage data.
+3. **LaunchAgent** at `~/Library/LaunchAgents/com.rainsday.codex-pet-meter.server.plist` — keeps `server.mjs` running across reboots, restarts it if it crashes (`KeepAlive`).
 
 No Codex.app modification, no asar patching, no integrity hash drama. Just a floating overlay that tracks the pet's window position natively.
 
@@ -50,17 +53,18 @@ After install, you must:
 ## Usage
 
 ```bash
-# Start (or restart) the app
-node install.mjs start
+# App
+node install.mjs start              # restart app (also ensures server is running)
+node install.mjs reset              # restart app at default screen position
+node install.mjs status             # is the app process running?
 
-# Reset halo to default position
-node install.mjs reset
+# Server (managed by launchd, survives reboots)
+node install.mjs status-server      # is the server loaded? show pid + log path
+node install.mjs start-server       # (re)start via launchd
+node install.mjs stop-server        # stop via launchd
 
-# Check status
-node install.mjs status
-
-# Stop and remove
-node install.mjs uninstall
+# Cleanup
+node install.mjs uninstall          # stop + remove app AND server LaunchAgent
 ```
 
 Menu bar icon (small ring glyph) provides:
@@ -111,10 +115,18 @@ curl http://127.0.0.1:43741/api/usage
 
 Should return JSON. If it errors with `Codex auth not found`, run `codex login` in the terminal first.
 
-To start the server manually:
+Server lifecycle is managed by launchd:
 
 ```bash
-node server.mjs
+node install.mjs status-server      # show state + log path
+node install.mjs start-server       # kickstart it
+tail -f /tmp/codex-pet-meter-server.log
+```
+
+If the LaunchAgent itself is missing (e.g. you cloned but didn't run `setup.sh`):
+
+```bash
+node install.mjs install-server
 ```
 
 ## How rebuilds + permissions interact
