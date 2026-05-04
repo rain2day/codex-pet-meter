@@ -479,7 +479,7 @@ final class HaloView: NSView {
         drawRing(context: context, center: center, radius: 47, width: 6.0, percent: weekly, color: weeklyColor)
         if displayMode == .pulse {
             drawPulse(context: context, center: center, radius: 61, percent: session, color: sessionColor, size: 15, phaseOffset: 0)
-            drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.45)
+            drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.9)
         }
 
         if isHovering {
@@ -622,19 +622,19 @@ final class HaloView: NSView {
         let basePoint = CGPoint(x: center.x + cos(angle) * radius,
                                 y: center.y + sin(angle) * radius)
 
-        // Heartbeat at ~67 BPM (0.9s cycle). Inside each cycle, the QRS
-        // complex (R wave peak + S wave dip) fires in the first ~15% of the
-        // cycle; the rest is flat baseline. Peaks are gaussians for the
-        // characteristic sharp-attack/sharp-decay EKG shape.
-        let cycle: TimeInterval = 0.9
+        // Heartbeat at ~33 BPM (1.8s cycle) — slow enough that the QRS shape
+        // is readable, not just a flicker. Inside each cycle, the QRS complex
+        // (R peak + S dip) takes the first 25% (~450ms); the rest is flat
+        // baseline. Peaks are gaussians for the sharp-attack/sharp-decay shape.
+        let cycle: TimeInterval = 1.8
         let phase = elapsed.truncatingRemainder(dividingBy: cycle) / cycle  // 0..1
 
         var beatR: Double = 0  // R wave (tall upward spike, radially outward)
         var beatS: Double = 0  // S wave (smaller dip, radially inward)
-        if phase < 0.15 {
-            let p = phase / 0.15
-            beatR = exp(-pow((p - 0.4) * 12, 2))
-            beatS = exp(-pow((p - 0.65) * 12, 2))
+        if phase < 0.25 {
+            let p = phase / 0.25
+            beatR = exp(-pow((p - 0.4) * 9, 2))
+            beatS = exp(-pow((p - 0.65) * 9, 2))
         }
 
         // Decompose movement into ring-tangent (along the arc) and radial
