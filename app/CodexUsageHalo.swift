@@ -473,8 +473,8 @@ final class HaloView: NSView {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let session = displayPercent(sessionPercent)
         let weekly = displayPercent(weeklyPercent)
-        let sessionColor = NSColor(calibratedRed: 0.30, green: 0.91, blue: 0.82, alpha: 1)
-        let weeklyColor = NSColor(calibratedRed: 1.00, green: 0.75, blue: 0.31, alpha: 1)
+        let sessionColor = Self.sessionColor()
+        let weeklyColor = Self.weeklyColor()
         drawRing(context: context, center: center, radius: 61, width: 7.5, percent: session, color: sessionColor)
         drawRing(context: context, center: center, radius: 47, width: 6.0, percent: weekly, color: weeklyColor)
         if displayMode == .pulse {
@@ -483,10 +483,36 @@ final class HaloView: NSView {
         }
 
         if isHovering {
-            drawBadge(text: "\(Int(round(session)))%", rect: sessionBadgeRect(), color: NSColor(calibratedRed: 0.30, green: 0.91, blue: 0.82, alpha: 0.48))
-            drawBadge(text: "\(Int(round(weekly)))%", rect: weeklyBadgeRect(), color: NSColor(calibratedRed: 1.00, green: 0.75, blue: 0.31, alpha: 0.48))
+            drawBadge(text: "\(Int(round(session)))%", rect: sessionBadgeRect(), color: sessionColor.withAlphaComponent(0.48))
+            drawBadge(text: "\(Int(round(weekly)))%", rect: weeklyBadgeRect(), color: weeklyColor.withAlphaComponent(0.48))
             drawBadge(text: resetLabel(), rect: statusRect(), color: NSColor(white: 1, alpha: 0.22), fontSize: 11)
         }
+    }
+
+    static let defaultSessionColor = NSColor(calibratedRed: 0.30, green: 0.91, blue: 0.82, alpha: 1)
+    static let defaultWeeklyColor  = NSColor(calibratedRed: 1.00, green: 0.75, blue: 0.31, alpha: 1)
+
+    static func sessionColor() -> NSColor {
+        loadColor(forKey: "sessionColor", default: defaultSessionColor)
+    }
+    static func weeklyColor() -> NSColor {
+        loadColor(forKey: "weeklyColor", default: defaultWeeklyColor)
+    }
+
+    private static func loadColor(forKey key: String, default fallback: NSColor) -> NSColor {
+        guard let arr = UserDefaults.standard.array(forKey: key) as? [Double], arr.count == 4 else {
+            return fallback
+        }
+        return NSColor(calibratedRed: CGFloat(arr[0]), green: CGFloat(arr[1]),
+                       blue: CGFloat(arr[2]), alpha: CGFloat(arr[3]))
+    }
+
+    static func saveColor(_ color: NSColor, forKey key: String) {
+        let c = color.usingColorSpace(.genericRGB) ?? color
+        UserDefaults.standard.set(
+            [Double(c.redComponent), Double(c.greenComponent),
+             Double(c.blueComponent), Double(c.alphaComponent)],
+            forKey: key)
     }
 
     func reloadSettings() {
@@ -865,6 +891,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(leftItem)
         menu.addItem(.separator())
 
+        menu.addItem(NSMenuItem(title: "Session ring color…", action: #selector(pickSessionColor), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Weekly ring color…", action: #selector(pickWeeklyColor), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Reset colors", action: #selector(resetColors), keyEquivalent: ""))
+        menu.addItem(.separator())
+
         menu.addItem(NSMenuItem(title: "Show meter", action: #selector(showHalo), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Reset position", action: #selector(resetPosition), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Reset calibration", action: #selector(resetCalibration), keyEquivalent: ""))
@@ -893,6 +924,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func resetCalibration() {
         UserDefaults.standard.removeObject(forKey: "mascotPercentX")
         UserDefaults.standard.removeObject(forKey: "mascotPercentY")
+        haloView?.reloadSettings()
+    }
+
+    // Color customization. NSColorPanel is shared app-wide; we route its color
+    // changes to either the session or weekly key based on which menu item the
+    // user clicked last. NSApp.activate brings the (LSUIElement) accessory app
+    // forward so the panel actually accepts input.
+    private var colorPickTarget: String?
+
+    @objc private func pickSessionColor() {
+        presentColorPanel(targetKey: "sessionColor", current: HaloView.sessionColor())
+    }
+
+    @objc private func pickWeeklyColor() {
+        presentColorPanel(targetKey: "weeklyColor", current: HaloView.weeklyColor())
+    }
+
+    private func presentColorPanel(targetKey: String, current: NSColor) {
+        colorPickTarget = targetKey
+        let panel = NSColorPanel.shared
+        panel.color = current
+        panel.setTarget(self)
+        panel.setAction(#selector(colorPicked(_:)))
+        panel.showsAlpha = true
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func colorPicked(_ sender: NSColorPanel) {
+        guard let key = colorPickTarget else { return }
+        HaloView.saveColor(sender.color, forKey: key)
+        haloView?.reloadSettings()
+    }
+
+    @objc private func resetColors() {
+        UserDefaults.standard.removeObject(forKey: "sessionColor")
+        UserDefaults.standard.removeObject(forKey: "weeklyColor")
         haloView?.reloadSettings()
     }
 
