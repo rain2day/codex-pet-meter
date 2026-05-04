@@ -732,12 +732,15 @@ final class HaloView: NSView {
     }
 
     private func resetLabel() -> String {
-        guard let resetsAt else { return "5h reset" }
-        let seconds = max(0, resetsAt.timeIntervalSinceNow)
-        if seconds >= 3600 {
-            return "5h reset in \(Int(ceil(seconds / 3600)))h"
-        }
-        return "5h reset in \(max(1, Int(ceil(seconds / 60))))m"
+        guard let resetsAt else { return "—" }
+        let total = max(0, Int(resetsAt.timeIntervalSinceNow))
+        if total == 0 { return "Resetting" }
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
     }
 
     private func persistWindowFrame() {
