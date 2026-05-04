@@ -479,7 +479,7 @@ final class HaloView: NSView {
         drawRing(context: context, center: center, radius: 47, width: 6.0, percent: weekly, color: weeklyColor)
         if displayMode == .pulse {
             drawPulse(context: context, center: center, radius: 61, percent: session, color: sessionColor, size: 15, phaseOffset: 0)
-            drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.9)
+            drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.6)
         }
 
         if isHovering {
@@ -622,35 +622,54 @@ final class HaloView: NSView {
         let basePoint = CGPoint(x: center.x + cos(angle) * radius,
                                 y: center.y + sin(angle) * radius)
 
-        // Heartbeat at ~33 BPM (1.8s cycle) — slow enough that the QRS shape
-        // is readable, not just a flicker. Inside each cycle, the QRS complex
-        // (R peak + S dip) takes the first 25% (~450ms); the rest is flat
-        // baseline. Peaks are gaussians for the sharp-attack/sharp-decay shape.
-        let cycle: TimeInterval = 1.8
+        // Heartbeat at ~50 BPM (1.2s cycle). The PQRST waveform plays through
+        // the first ~70% of each cycle so the line is animating most of the
+        // time, not flat-then-spike-then-flat:
+        //   phase 0.05–0.10 : P wave  (small bump before QRS)
+        //   phase 0.20–0.30 : R wave  (tall outward spike)
+        //   phase 0.30–0.40 : S wave  (inward dip)
+        //   phase 0.55–0.70 : T wave  (small bump after QRS)
+        // All peaks are gaussians, so attack/decay is smooth.
+        let cycle: TimeInterval = 1.2
         let phase = elapsed.truncatingRemainder(dividingBy: cycle) / cycle  // 0..1
 
-        var beatR: Double = 0  // R wave (tall upward spike, radially outward)
-        var beatS: Double = 0  // S wave (smaller dip, radially inward)
-        if phase < 0.25 {
-            let p = phase / 0.25
-            beatR = exp(-pow((p - 0.4) * 9, 2))
-            beatS = exp(-pow((p - 0.65) * 9, 2))
-        }
+        let beatP: Double = 0.35 * exp(-pow((phase - 0.07) * 22, 2))   // P wave
+        let beatR: Double = 1.0  * exp(-pow((phase - 0.25) * 22, 2))   // R wave (tall)
+        let beatS: Double = 0.55 * exp(-pow((phase - 0.35) * 22, 2))   // S wave (dip)
+        let beatT: Double = 0.45 * exp(-pow((phase - 0.62) * 14, 2))   // T wave (slow hump)
 
         // Decompose movement into ring-tangent (along the arc) and radial
         // (outward from center) basis vectors.
         let radialX = cos(angle), radialY = sin(angle)
         let tanX = -sin(angle), tanY = cos(angle)
 
-        let baselineLen: CGFloat = size * 2.6
-        let peakOut = CGFloat(beatR) * size * 1.6
-        let peakIn = CGFloat(beatS) * size * 0.7
+        let baselineLen: CGFloat = size * 3.0
+        let pHeight = CGFloat(beatP) * size * 0.5
+        let rHeight = CGFloat(beatR) * size * 1.8
+        let sHeight = CGFloat(beatS) * size * 0.7
+        let tHeight = CGFloat(beatT) * size * 0.6
 
-        // 5 points along the tangent direction. Middle two carry the QRS
-        // displacement; outer points stay on the ring as flat baseline.
-        let tangentOffsets: [CGFloat] = [-baselineLen / 2, -baselineLen / 8, 0,
-                                          baselineLen / 8, baselineLen / 2]
-        let radialDisplacements: [CGFloat] = [0, peakOut, -peakIn, 0, 0]
+        // 7 points along the tangent direction laid out left-to-right in time
+        // order: baseline, P wave, PR segment, R peak, S dip, T wave, baseline.
+        // Each peak only contributes when its phase window is active.
+        let tangentOffsets: [CGFloat] = [
+            -baselineLen / 2,
+            -baselineLen * 3 / 8,
+            -baselineLen / 4,
+            -baselineLen / 8,
+             0,
+             baselineLen / 4,
+             baselineLen / 2,
+        ]
+        let radialDisplacements: [CGFloat] = [
+            0,
+            pHeight,
+            0,
+            rHeight,
+            -sHeight,
+            tHeight,
+            0,
+        ]
         let points: [CGPoint] = zip(tangentOffsets, radialDisplacements).map { off, rad in
             CGPoint(x: basePoint.x + tanX * off + radialX * rad,
                     y: basePoint.y + tanY * off + radialY * rad)
