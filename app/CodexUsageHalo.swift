@@ -504,19 +504,25 @@ final class HaloView: NSView {
                 drawPulse(context: context, center: center, radius: 47, percent: weekly, color: weeklyColor, size: 11, phaseOffset: 0.6)
             }
         case .split:
-            // Same radius, vertically bisected: session right half (clockwise
-            // from 12 o'clock), weekly left half (counter-clockwise).
-            // 100% fills its half-circle from top to bottom.
+            // Vertically bisected, both rings share one radius. Both fill in
+            // CCW direction so they grow AWAY from each other:
+            //   Session: right half — starts at 6 o'clock, fills bottom→top
+            //            (CCW reaches 12 o'clock at 100%).
+            //   Weekly:  left half  — starts at 12 o'clock, fills top→bottom
+            //            (CCW reaches 6 o'clock at 100%).
+            // At low percentages the two arcs sit on opposite quadrants, so
+            // the "split" reading is unmistakable instead of two arcs both
+            // clustered near the top.
             let r: CGFloat = 56
             drawRing(context: context, center: center, radius: r, width: 7.0, percent: session, color: sessionColor,
-                     maxSweep: .pi, clockwise: true)
+                     startAngle: -.pi / 2, maxSweep: .pi, clockwise: false)
             drawRing(context: context, center: center, radius: r, width: 7.0, percent: weekly, color: weeklyColor,
-                     maxSweep: .pi, clockwise: false)
+                     startAngle: .pi / 2, maxSweep: .pi, clockwise: false)
             if displayMode == .pulse {
                 drawPulse(context: context, center: center, radius: r, percent: session, color: sessionColor, size: 13, phaseOffset: 0,
-                          maxSweep: .pi, clockwise: true)
+                          startAngle: -.pi / 2, maxSweep: .pi, clockwise: false)
                 drawPulse(context: context, center: center, radius: r, percent: weekly, color: weeklyColor, size: 13, phaseOffset: 0.6,
-                          maxSweep: .pi, clockwise: false)
+                          startAngle: .pi / 2, maxSweep: .pi, clockwise: false)
             }
         }
 
