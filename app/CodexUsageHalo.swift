@@ -616,47 +616,59 @@ final class HaloView: NSView {
     private func drawPulse(context: CGContext, center: CGPoint, radius: CGFloat, percent: Double, color: NSColor, size: CGFloat, phaseOffset: TimeInterval) {
         let elapsed = Date().timeIntervalSince(animationStart) + phaseOffset
 
-        // Position on the ring — same sweep envelope as the legacy orb so the
-        // pulse marker still glides between min/max percent over time.
-        let sweep = 0.08 + 0.92 * ((sin(elapsed * 1.08) + 1) / 2)
-        let livePercent = max(0, min(100, percent * sweep))
-        let angle = CGFloat.pi / 2 - CGFloat.pi * 2 * CGFloat(livePercent / 100)
-        let point = CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
+        // Anchor at the actual percent position on the ring (no sweep — the
+        // EKG waveform itself is the animation, marker stays put).
+        let angle = CGFloat.pi / 2 - CGFloat.pi * 2 * CGFloat(percent / 100)
+        let basePoint = CGPoint(x: center.x + cos(angle) * radius,
+                                y: center.y + sin(angle) * radius)
 
-        // Heartbeat at ~67 BPM (0.9s cycle, calm resting heart rate).
-        // Two staggered components:
-        //   1. Three concentric ripples expanding outward, fading as they grow
-        //   2. A core dot with a "lub-dub" double-peak envelope (gaussian
-        //      pulses at phase 0.07 and 0.22 within each cycle) — mimics the
-        //      sharp-attack/long-decay shape of a real arterial pulse
+        // Heartbeat at ~67 BPM (0.9s cycle). Inside each cycle, the QRS
+        // complex (R wave peak + S wave dip) fires in the first ~15% of the
+        // cycle; the rest is flat baseline. Peaks are gaussians for the
+        // characteristic sharp-attack/sharp-decay EKG shape.
         let cycle: TimeInterval = 0.9
         let phase = elapsed.truncatingRemainder(dividingBy: cycle) / cycle  // 0..1
 
-        context.saveGState()
-        context.translateBy(x: point.x, y: point.y)
-
-        // Expanding ripples (3 staggered phases for continuous emanation)
-        for i in 0..<3 {
-            let p = (phase + Double(i) / 3.0).truncatingRemainder(dividingBy: 1.0)
-            let r = size * (0.4 + p * 1.6)
-            let alpha = (1.0 - p) * 0.55
-            context.setStrokeColor(color.withAlphaComponent(alpha).cgColor)
-            context.setLineWidth(1.2)
-            context.strokeEllipse(in: CGRect(x: -r, y: -r, width: r * 2, height: r * 2))
+        var beatR: Double = 0  // R wave (tall upward spike, radially outward)
+        var beatS: Double = 0  // S wave (smaller dip, radially inward)
+        if phase < 0.15 {
+            let p = phase / 0.15
+            beatR = exp(-pow((p - 0.4) * 12, 2))
+            beatS = exp(-pow((p - 0.65) * 12, 2))
         }
 
-        // Lub-dub heartbeat throb on the core
-        let lub = exp(-pow((phase - 0.07) * 20, 2))           // primary peak
-        let dub = 0.55 * exp(-pow((phase - 0.22) * 20, 2))    // smaller secondary
-        let beat = max(lub, dub)
-        let coreScale = 1 + beat * 0.45
-        let coreSize = size * 0.55 * coreScale
-        context.setShadow(offset: .zero, blur: 12,
-                          color: color.withAlphaComponent(0.7 + beat * 0.3).cgColor)
-        context.setFillColor(color.cgColor)
-        context.fillEllipse(in: CGRect(x: -coreSize / 2, y: -coreSize / 2,
-                                       width: coreSize, height: coreSize))
+        // Decompose movement into ring-tangent (along the arc) and radial
+        // (outward from center) basis vectors.
+        let radialX = cos(angle), radialY = sin(angle)
+        let tanX = -sin(angle), tanY = cos(angle)
 
+        let baselineLen: CGFloat = size * 2.6
+        let peakOut = CGFloat(beatR) * size * 1.6
+        let peakIn = CGFloat(beatS) * size * 0.7
+
+        // 5 points along the tangent direction. Middle two carry the QRS
+        // displacement; outer points stay on the ring as flat baseline.
+        let tangentOffsets: [CGFloat] = [-baselineLen / 2, -baselineLen / 8, 0,
+                                          baselineLen / 8, baselineLen / 2]
+        let radialDisplacements: [CGFloat] = [0, peakOut, -peakIn, 0, 0]
+        let points: [CGPoint] = zip(tangentOffsets, radialDisplacements).map { off, rad in
+            CGPoint(x: basePoint.x + tanX * off + radialX * rad,
+                    y: basePoint.y + tanY * off + radialY * rad)
+        }
+
+        context.saveGState()
+        context.setLineCap(.round)
+        context.setLineJoin(.miter)  // sharp corners for EKG feel
+        context.setLineWidth(2)
+        context.setStrokeColor(color.cgColor)
+        context.setShadow(offset: .zero, blur: 8,
+                          color: color.withAlphaComponent(0.65).cgColor)
+        context.beginPath()
+        context.move(to: points[0])
+        for p in points.dropFirst() {
+            context.addLine(to: p)
+        }
+        context.strokePath()
         context.restoreGState()
     }
 
