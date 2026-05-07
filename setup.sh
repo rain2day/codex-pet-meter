@@ -40,10 +40,8 @@ cat <<'EOF'
 The Pet Meter app is in ~/Applications and was just launched. The halo
 will follow whichever Codex pet you have set, no calibration step needed.
 
-Codex publishes the pet's sprite rect to ~/.codex/.codex-global-state.json,
-which the app reads every 100ms — so there's no Accessibility prompt and
-no helper server to manage. The app reads ~/.codex/auth.json directly to
-fetch usage data from the OpenAI usage API once a minute.
+The app follows Codex's pet from the local Codex state file and reads usage
+from local Codex / Claude credentials. OpenUsage is not required.
 
 Useful commands:
   node install.mjs status      # is the app running?

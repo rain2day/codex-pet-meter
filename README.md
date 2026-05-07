@@ -1,36 +1,29 @@
 # Codex Pet Meter
 
-A floating halo overlay that wraps the OpenAI **Codex** desktop app's pet mascot with two animated rings showing your **5-hour session** and **weekly** usage as a live ECG-style heartbeat pulse.
+![Codex Pet Meter preview](assets/preview.png)
 
-- **Cyan ring** — current 5-hour session usage
-- **Yellow ring** — weekly usage
-- **Hover** the rings to see exact percentages and time-until-reset
-- **Customizable colors** for each ring
-- **Two layouts**: stacked (concentric) or split (left/right semicircles)
-- **Pulse motion** scrolls a PQRST waveform along each filled arc, or switch to plain rings
+A small macOS menu bar app that places a live usage meter around the Codex pet.
 
-> Status: works on macOS 13+. **Source install only — no prebuilt release yet.**
-> Requires the OpenAI Codex desktop app, Node.js (for the build script), and Xcode Command Line Tools.
+It can show Codex and Claude usage together, with separate session and weekly indicators. The overlay follows the pet automatically and does not modify `Codex.app`.
 
-## How it works
+## Features
 
-A single Swift app reads two files Codex itself maintains:
-
-1. **`~/.codex/.codex-global-state.json`** — Codex publishes the pet sprite's exact screen rect here (`electron-avatar-overlay-bounds.mascot`), updated whenever the pet moves or hides. The app polls this every 100 ms and centers the halo on whatever rect Codex reports. No Accessibility permission needed, no calibration, no edge-case workarounds.
-2. **`~/.codex/auth.json`** — Codex stores its OAuth tokens here. The app reads the access token, fetches usage from `https://chatgpt.com/backend-api/wham/usage` once a minute, and refreshes the token via `https://auth.openai.com/oauth/token` when it expires.
-
-No Codex.app modification, no helper server, no LaunchAgent, no asar patching. Just one app bundle in `~/Applications`.
+- Ring or pulse display modes
+- Combined, Codex-only, or Claude-only usage
+- Session and weekly percentages, with hover details
+- 5-hour or 7-day reset indicator
+- Custom colors for Codex, Claude, weekly, and reset lines
+- Local-only usage reading; OpenUsage is not required
 
 ## Install
 
-### Prerequisites
+Requirements:
 
 - macOS 13+
-- [OpenAI Codex desktop app](https://openai.com/) installed and signed in (`codex login`)
-- Node.js 20+ (build script runs on Node)
-- Xcode Command Line Tools (`xcode-select --install`)
-
-### Setup
+- Node.js 20+
+- Xcode Command Line Tools
+- Codex desktop app signed in
+- Claude Code signed in, if you want Claude usage
 
 ```bash
 git clone https://github.com/rain2day/codex-pet-meter.git
@@ -38,58 +31,51 @@ cd codex-pet-meter
 ./setup.sh
 ```
 
-The script builds and installs `~/Applications/Codex Pet Meter.app` and launches it. The halo immediately snaps to your Codex pet — no first-run dance, no permission prompts.
+The app is installed to:
 
-If the pet is hidden, the halo hides too. Show the pet again and the halo comes back.
-
-## Usage
-
-```bash
-node install.mjs start              # restart the app
-node install.mjs status             # is the app process running?
-node install.mjs uninstall          # stop and remove
+```text
+~/Applications/Codex Pet Meter.app
 ```
 
-Menu bar icon (small ring glyph) provides:
-- **Pulse motion** / **Ring only** — toggle the heartbeat wave on the rings
-- **Stacked rings** / **Split rings (week ◐ session)** — concentric vs vertically bisected layout
-- **Show used** / **Show left** — switch percent display
-- **Session ring color…** / **Weekly ring color…** / **Reset colors** — pick any color via the system color picker
-- **Show meter** — bring the halo back to front
-- **Quit**
+## Menu
+
+Use the menu bar icon to change:
+
+- Display Mode: `Pulse motion` or `Ring only`
+- Data: `Combined`, `Codex`, `Claude`, used/left, and reset window
+- Colors: provider session, weekly, and reset colors
+
+Useful commands:
+
+```bash
+node install.mjs start
+node install.mjs status
+node install.mjs uninstall
+```
+
+## Data And Privacy
+
+The app reads local Codex and Claude credentials already stored on your Mac, then stores only a small local usage cache and your UI settings.
+
+It does not patch Codex, install a background service, or require OpenUsage.
 
 ## Troubleshooting
 
-### Halo shows 0% / no data
+If the meter does not appear, make sure the Codex pet is visible.
 
-Check the auth file exists and the API is reachable:
+If usage is missing, sign in again to the relevant tool:
 
 ```bash
-cat ~/.codex/auth.json     # should show auth_mode + tokens
+codex login
+claude
 ```
 
-If `auth_mode` is `chatgpt`, the app uses the ChatGPT account token. If it's `api_key`, usage data isn't available (OpenAI doesn't expose usage for API-key auth).
-
-Watch the app log:
+Log:
 
 ```bash
 tail -f /tmp/codex-usage-halo.log
 ```
 
-### Halo doesn't appear
-
-Make sure Codex's pet is visible (the avatar mascot, not the menu bar icon). Toggle it from inside Codex if needed. The state file should look like:
-
-```bash
-python3 -c 'import json; d=json.load(open("'"$HOME"'/.codex/.codex-global-state.json")); print(d.get("electron-avatar-overlay-open"), d.get("electron-avatar-overlay-bounds", {}).get("mascot"))'
-```
-
-`True` plus a `{left, top, width, height}` dict means the app should find the sprite.
-
-## Architecture notes
-
-See [docs/design.md](docs/design.md) for the diagnosis trail behind the original AX-based tracking implementation. The current file-based approach (since v0.3.0) sidesteps every issue documented there by reading the sprite rect from Codex's own state file.
-
 ## License
 
-MIT — see [LICENSE](LICENSE). This project is not affiliated with OpenAI.
+MIT. This project is not affiliated with OpenAI or Anthropic.

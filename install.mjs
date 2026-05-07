@@ -8,9 +8,12 @@ import { fileURLToPath } from "node:url";
 const execFile = promisify(execFileCb);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourcePath = path.join(__dirname, "app", "CodexUsageHalo.swift");
+const menuIconSourcePath = path.join(__dirname, "assets", "menu-icon", "status-icon.png");
 const appPath = path.join(os.homedir(), "Applications", "Codex Pet Meter.app");
 const contentsPath = path.join(appPath, "Contents");
 const macosPath = path.join(contentsPath, "MacOS");
+const resourcesPath = path.join(contentsPath, "Resources");
+const menuIconResourcePath = path.join(resourcesPath, "status-icon.png");
 const executablePath = path.join(macosPath, "CodexPetMeter");
 const plistPath = path.join(contentsPath, "Info.plist");
 
@@ -61,7 +64,11 @@ async function run(command, args, options = {}) {
 async function install() {
   await stop();
   await fs.mkdir(macosPath, { recursive: true });
+  await fs.mkdir(resourcesPath, { recursive: true });
   await fs.writeFile(plistPath, plist(), "utf8");
+  await fs.rm(path.join(resourcesPath, "WarningHaloShards"), { recursive: true, force: true });
+  await fs.rm(path.join(resourcesPath, "BreathingAura"), { recursive: true, force: true });
+  await fs.copyFile(menuIconSourcePath, menuIconResourcePath);
   await run("/usr/bin/swiftc", [
     sourcePath,
     "-O",

@@ -10,6 +10,11 @@ build/
 /tmp/codex-usage-halo.log
 /tmp/codex-usage-halo-trace.log
 
+# Generated asset workbench / QA outputs
+assets/qa/
+assets/**/source/
+assets/breathing-aura-single/
+
 # Node
 node_modules/
 npm-debug.log*

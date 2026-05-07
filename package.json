@@ -1,7 +1,7 @@
 {
   "name": "codex-pet-meter",
   "version": "0.1.0",
-  "description": "Floating halo overlay showing OpenAI Codex usage on the pet mascot",
+  "description": "macOS pet overlay for Codex and Claude usage",
   "type": "module",
   "main": "install.mjs",
   "scripts": {
@@ -23,10 +23,10 @@
     "macos",
     "overlay",
     "codex",
+    "claude",
     "openai",
     "usage",
     "swift",
-    "appkit",
-    "accessibility-api"
+    "appkit"
   ]
 }
