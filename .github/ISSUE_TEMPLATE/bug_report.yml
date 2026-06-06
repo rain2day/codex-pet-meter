@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible problem with Codex Pet Meter.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not paste access tokens, refresh tokens, or raw credential files.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.5"
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "v20.12.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Usage mode
+      options:
+        - Combined
+        - Codex
+        - Claude
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ./setup.sh
+        2. Open the menu bar item
+        3. Select ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Check output
+      description: Paste sanitized output from npm run check, if relevant.
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized log excerpt
+      description: Paste only relevant lines from /tmp/codex-usage-halo.log. Remove secrets.
+      render: text

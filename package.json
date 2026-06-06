@@ -1,10 +1,12 @@
 {
   "name": "codex-pet-meter",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "macOS pet overlay for Codex and Claude usage",
   "type": "module",
   "main": "install.mjs",
   "scripts": {
+    "check": "node --check install.mjs && bash -n setup.sh && /usr/bin/swiftc -typecheck -framework Cocoa app/CodexUsageHalo.swift",
+    "ci": "npm run check",
     "install-app": "node install.mjs install",
     "start": "node install.mjs start",
     "status": "node install.mjs status",
@@ -26,7 +28,10 @@
     "claude",
     "openai",
     "usage",
+    "usage-meter",
     "swift",
-    "appkit"
+    "appkit",
+    "local-first",
+    "menu-bar"
   ]
 }

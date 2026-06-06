@@ -16,6 +16,7 @@ const resourcesPath = path.join(contentsPath, "Resources");
 const menuIconResourcePath = path.join(resourcesPath, "status-icon.png");
 const executablePath = path.join(macosPath, "CodexPetMeter");
 const plistPath = path.join(contentsPath, "Info.plist");
+const appVersion = "0.3.0";
 
 function plist() {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -33,7 +34,7 @@ function plist() {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.0</string>
+  <string>${appVersion}</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
